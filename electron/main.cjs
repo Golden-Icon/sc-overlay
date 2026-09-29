@@ -1412,9 +1412,26 @@ function registerInteractHotkey(accel) {
       if (holdInteract) { holdInteract = false; applyMouse(); }
       if (notepadFocusPending) { notepadFocusPending = false; try { overlay && !overlay.isDestroyed() && overlay.webContents.send("overlay:notepad-focus"); } catch { /* ignore */ } }
     });
+  // 🔑 LINUX/WAYLAND: the uiohook X11 hook is blind while a NATIVE Wayland window (Star Citizen
+  // on the LUG Wayland runner) holds focus — the key never reaches X11, so the overlay can't
+  // arm itself. The evdev fallback reads /dev/input/event* directly, one layer below X11, so
+  // it sees the keypress regardless of which display server has focus. This is what makes
+  // hold-to-interact usable on Wayland rather than only while alt-tabbed.
+  if (process.platform === "linux") {
+    if (evdevInteractController) { try { evdevInteractController.stop(); } catch { /* ignore */ } evdevInteractController = null; }
+    evdevInteractController = startEvdevHoldKey({
+      accelerator: accel,
+      onDown: () => { if (!holdMode || notepadEditing) return; holdInteract = true; applyMouse(); try { overlay && !overlay.isDestroyed() && overlay.webContents.send("overlay:summon-cog"); } catch { /* ignore */ } },
+      onUp: () => { if (holdInteract) { holdInteract = false; applyMouse(); } if (notepadFocusPending) { notepadFocusPending = false; try { overlay && !overlay.isDestroyed() && overlay.webContents.send("overlay:notepad-focus"); } catch { /* ignore */ } } },
+    });
+    if (r.ok) interactAccel = accel;
+    console.log(`[linux-interact] ${accel}: uiohook=${r.ok ? "ok" : "no"} evdev=${evdevInteractController?.supported ? "ok" : "no"}`);
+    return (r.ok || evdevInteractController?.supported) ? { ok: true } : r;
+  }
   if (r.ok) interactAccel = accel;
   return r;
 }
+let evdevInteractController = null;
 let moveAccel = null;
 function registerMoveHotkey(accel) {
   if (moveAccel) hotkeys.unregister(moveAccel);
