@@ -18,6 +18,10 @@ const fs = require("node:fs");
 const { autoUpdater } = require("electron-updater");
 // Hotkeys go through a low-level keyboard hook (see hotkeys.cjs) instead of Electron's
 // globalShortcut, so they fire while Star Citizen has focus (RegisterHotKey does not).
+const { OverlayWindowManager } = require("./window-manager.cjs");
+const { BrowserWidgetController, DEFAULT_BROWSER_URL } = require("./browser-widget.cjs");
+const { startEvdevHoldKey } = require("./linux/evdev-hold-key.cjs");
+const overlayWindows = new OverlayWindowManager({ BrowserWindow, screen, app, env: process.env, logger: console });
 const hotkeys = require("./hotkeys.cjs");
 const { startFabCapture } = require("./capture.cjs");
 const foreground = require("./foreground.cjs");
@@ -663,6 +667,8 @@ function reportGeometry() {
 // decorations can hang into open canvas and widgets can be dragged/scaled/moved across monitors.
 // Per-widget position/size/visibility live in widgets.json (see below), NOT a window-bounds file —
 // the window itself is fixed. Click-through except over the widget the pointer is on (applyMouse).
+function pinOverlayWindow(win) { overlayWindows.pin(win); }
+
 function createOverlay() {
   const bounds = fullDisplayBounds(); // spans all monitors
   overlayLoaded = false; // a fresh window has no listeners until its did-finish-load
@@ -688,8 +694,11 @@ function createOverlay() {
     webPreferences: { contextIsolation: true, preload: path.join(__dirname, "preload.cjs"), autoplayPolicy: "no-user-gesture-required" },
   });
   // Float above borderless fullscreen games.
-  overlay.setAlwaysOnTop(true, "screen-saver");
-  overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Float above borderless fullscreen games. pin() is the platform-correct way to do this:
+  // on Linux the always-on-top level that beats a borderless Vulkan game is set through the
+  // window manager (desktop-layout.cjs) rather than Electron's setAlwaysOnTop, which
+  // XWayland ignores for override-redirect/decorless windows.
+  pinOverlayWindow(overlay);
   // 🔑 Windows CLAMPS a transparent window's INITIAL (constructor) size to the display it opens
   // on, so a virtual-desktop-spanning size gets shrunk to the primary (window ends up positioned
   // at the desktop origin but only primary-sized → the canvas can't reach the other monitors).
