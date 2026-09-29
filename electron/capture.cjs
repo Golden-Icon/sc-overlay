@@ -716,7 +716,18 @@ function startFabCapture({ port, configDir, onStatus, devTools = false }) {
     }
     const tFg = Date.now();
     const fg = await foregroundWindow();
-    if (!/^StarCitizen$/i.test(fg.name)) {
+    // 🔑 Ask the platform's own watcher whether the game is in front, rather than testing the
+    // name here. The inline /^StarCitizen$/i was correct on Windows and WRONG on Linux, where
+    // KWin reports the client's resourceClass — "starcitizen.exe". The test never matched, so
+    // every tick bailed at this line and the mining reader never captured a frame. It failed
+    // SILENTLY: emitContext("idle") is exactly what an idle overlay looks like, so the symptom
+    // was "mining does nothing" with a healthy OCR self-test and a live loop — the one
+    // combination that points blame everywhere except the real cause.
+    //
+    // fgWatch.gameInFront() is the predicate each platform gets right: /^StarCitizen$/i on
+    // Windows (where it must NOT match, or every Wine app on the box counts as the game), and
+    // /starcitizen/i on Linux against resourceClass.
+    if (!fgWatch.gameInFront()) {
       emitContext("idle");
       return;                                                             // only ever look at SC
     }

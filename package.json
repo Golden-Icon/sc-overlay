@@ -38,6 +38,7 @@
     "test:mining": "tsx src/mining-debris.test.ts",
     "test:report": "tsx src/report-blueprints.test.ts",
     "test:screenocr": "tsx src/screen-resurrect.test.ts",
+    "test:screenocr:linux": "tsx tools/ocr-selftest-linux.ts && tsx tools/ocr-digits-accuracy.ts && tsx tools/mining-classify-e2e.ts",
     "test:repaccrual": "tsx src/rep-accrual.test.ts",
     "probe:rep": "tsx tools/rep-verify-probe.mts",
     "test:logpaths": "tsx src/log-paths.test.ts",
