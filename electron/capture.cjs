@@ -65,6 +65,13 @@ const fgWatch = require(process.platform === "linux" ? "./foreground-linux.cjs" 
 // 3840x1607, exactly 1 unique colour). capture-linux.cjs grabs the frame from the compositor
 // instead, which sees every surface. The seam is identical, so this is a provider swap.
 const linuxCapture = process.platform === "linux" ? require("./capture-linux.cjs") : null;
+// The tesseract backend, shared with the TypeScript sidecar (src/screen-read-linux.ts is a thin
+// wrapper over this same file, so there is one parser rather than two that can drift).
+const tesseractOcr = require("./linux/tesseract-ocr.cjs");
+/** Charset for the mining crop re-read. Digits dominate — the signature and the percentage bars —
+ *  and the ore name beside them is matched against the catalog, so letters stay allowed. Leaving
+ *  out digits-adjacent confusables is the win here: tesseract otherwise offers up O/l/S for 0/1/5. */
+const MINING_WHITELIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,:;%/-+'#*()[]";
 const { readBars, pixelsOf } = require("./rep-bars.cjs");
 /* 🔑 WHICH REFUSALS ARE WORTH REPORTING IS THE SIDECAR'S CALL, not ours. It used to be an
    ACTIONABLE_REP_REFUSALS set right here — a second copy of src/rep-page.ts's own refusal
@@ -231,6 +238,23 @@ function saveDebugFrame(magnified, raw) {
 }
 
 async function ocrRapidLines(imgPath) {
+  // 🔑 LINUX: this must NOT load RapidOCR here. @gutenye/ocr-node pulls in sharp@0.33.5, whose
+  // libvips build asserts inside this Electron and takes the whole process down:
+  //     vips::VObject& operator=(): assertion failed: (!a.vobject || VIPS_IS_OBJECT(a.vobject))
+  //     Bail out!  electron exited with signal SIGABRT
+  // It fired the moment the first mining tick asked for a crop read — killing the window, the
+  // tray, the hotkeys and the sidecar together, on roughly every other launch. Tesseract is the
+  // engine that works on this box, so the crop re-read goes there instead. Same contract: lines
+  // with boxes, posted to /api/screen-read as a miningCrop.
+  if (process.platform === "linux") {
+    // Return the LINES, not the whole OcrResult. The Windows branch below returns a bare array
+    // (mapped straight off RapidOCR's detections) and every caller maps over it, so handing back
+    // the {w,h,lines} wrapper fails with "(intermediate value).map is not a function" and the
+    // crop read silently falls back to the full-frame path — the scan then reads as null and
+    // looks like "the overlay is not seeing my rock".
+    const res = await tesseractOcr.ocrImage(imgPath, { whitelist: MINING_WHITELIST });
+    return res.lines;
+  }
   const ocr = await getRapid();
   const res = await ocr.detect(imgPath);
   return (res || []).map((r) => {
