@@ -1,0 +1,21 @@
+diff --git a/electron/main.cjs b/electron/main.cjs
+index c5f222f..0547625 100644
+--- a/electron/main.cjs
++++ b/electron/main.cjs
+@@ -1867,7 +1867,15 @@ function createTray() {
+ if (!app.requestSingleInstanceLock()) {
+   app.quit();
+ } else {
+-  app.on("second-instance", () => {
++  app.on("second-instance", (_e, argv) => {
++    // Linux/Wayland helper: a second launch with --toggle-overlay flips the
++    // HUD instead of just showing it, so a desktop-wide shortcut (KWin sees
++    // every key, unlike X11 hooks while a native-Wayland game has focus)
++    // can drive the overlay: `sc-overlay-linux.sh toggle`.
++    if (Array.isArray(argv) && argv.some((a) => a === "--toggle-overlay")) {
++      toggleShow();
++      return;
++    }
+     if (overlay) {
+       overlay.show();
+       refreshTray();
