@@ -14,9 +14,9 @@
 // scan number's own box to confirm a read came off a real scan, and that contract has to survive
 // the engine swap.
 //
-// Accuracy is measured, not assumed: tools/ocr-digits-accuracy.ts reads 24/24 confusable
-// signatures exactly. That bar is 100% because the signature lookup is exact — one 5 read as an 8
-// is a player at the wrong rock with total confidence.
+// Accuracy was measured during the port, not assumed: 24/24 confusable signatures read exactly.
+// That bar is 100% because the signature lookup is exact — one 5 read as an 8 is a player at the
+// wrong rock with total confidence.
 
 import { createRequire } from "node:module";
 

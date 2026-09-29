@@ -17,8 +17,8 @@
 // cannot drift apart.
 //
 // Why tesseract and not RapidOCR on Linux is not a preference, it is the only thing that runs.
-// The accuracy is separately measured (tools/ocr-digits-accuracy.ts: 24/24 exact on confusable
-// signatures), so the trade is a crash on every launch versus a working engine.
+// The accuracy was measured during the port (24/24 exact on confusable signatures), so the trade
+// is a crash on every launch versus a working engine.
 
 "use strict";
 

@@ -53,7 +53,7 @@ Optional OCR can be enabled when you want help reading fabrication screens. That
 
 Requirements:
 
-- Windows
+- Windows, **or Linux** (see [Running on Linux](#running-on-linux) — the build is community-maintained, not shipped as an installer)
 - Star Citizen installed and running
 
 Install the desktop app:
@@ -63,6 +63,102 @@ Install the desktop app:
 - Launch the app and keep Star Citizen running while you use it.
 
 The app checks for updates on its own, so this is a one-time install.
+
+## Running on Linux
+
+This is a community port, maintained on the `linux-port` branch. It is not an official build and
+there is no `.deb` — you run it from source. It targets a **native Wayland** session (KDE Plasma /
+KWin) with the game running under Wine.
+
+### Requirements
+
+```bash
+sudo apt install tesseract-ocr imagemagick spectacle   # tesseract + ImageMagick + KWin capture
+```
+
+- **tesseract** is the OCR engine. It shells out to the `tesseract` binary, so it is a system
+  package and is deliberately *not* an npm dependency. Without it every OCR feature fails silently.
+- **ImageMagick** (`magick`) does the cropping, binarising and polarity normalisation.
+- **spectacle**, part of KDE, is what actually grabs the frame.
+
+### Running it
+
+Use the launcher rather than calling Electron directly — it sets the display environment that
+Wayland requires:
+
+```bash
+./sc-overlay-linux.sh start     # start the app and the sidecar
+./sc-overlay-linux.sh toggle    # show/hide the overlay canvas
+./sc-overlay-linux.sh stop
+```
+
+### Things that will otherwise waste your time
+
+**The overlay is forced onto X11, even though your session is Wayland.** Click-through needs a real
+X11 window, and the game is native Wayland. The launcher sets:
+
+```bash
+ELECTRON_OZONE_PLATFORM_HINT=x11
+DISPLAY=:0
+WAYLAND_DISPLAY=wayland-0
+XAUTHORITY=/run/user/1000/xauth_XXXXXX   # auto-detected by the launcher
+```
+
+If you launch Electron by hand without these, the canvas either will not map or will swallow every
+click.
+
+**`desktopCapturer` returns a solid black frame.** Under XWayland it cannot see the game's window —
+the game is native Wayland. This is why capture goes through `spectacle` instead. Do not "fix" this
+by switching to `desktopCapturer`; it is not a bug, it is the wrong API for this setup.
+
+**RapidOCR must never load on Linux.** `@gutenye/ocr-node` pulls in `sharp@0.33.5`, which aborts
+the entire Electron process on import — and it does so on the *first mining tick* when the game
+first gains focus. If the app dies the moment you aim at a rock, this is why. The capture loop
+gates it off on Linux deliberately.
+
+**Foreground detection runs through a KWin script, not an X11 hook.** `electron/kwin-foreground.qml`
+is loaded over the `/Scripting` D-Bus interface and reports the focused window as `SCFG1|name|x|y|w|h`.
+It must match `starcitizen.exe` — **never bare `wine`**, or every Wine app on your system counts as
+the game and the gate opens when it should not.
+
+**`spectacle` needs the full session environment.** `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`,
+`DBUS_SESSION_BUS_ADDRESS` and `DISPLAY` must all be set, or it segfaults instead of failing
+cleanly. `electron/capture-linux.cjs`'s `sessionEnv()` exists for this.
+
+### Configuring the scan read area
+
+This is the setting that decides whether the mining scanner works at all.
+
+Open the **Mining Scanner** widget, then its cog, and tick **"Show the scan read area."** A
+draggable box appears on the overlay. Drag it over the scan rating and it saves.
+
+- A **stale saved region fails silently** — the app reports `scan: null` and gives no error, because
+  from its point of view there is simply nothing in the box. If the scanner never reads, check this
+  first before suspecting OCR.
+- You must be **within mining beam range** (tens of metres) and **actually scanning**. Looking at a
+  distant marker draws a distance readout, not a signature, so there is legitimately nothing to
+  read.
+- The signature lookup is exact, so a single misread digit sends you to the wrong rock with total
+  confidence. That is why tesseract's 100% accuracy on confusable digits matters and is tested.
+
+### Hotkeys
+
+`holdToInteract` is **opt-in and defaults to `false`**. Until you turn it on in the config, the
+interact key (default `F`) does nothing at all — the handler returns immediately. This is
+intentional, so the overlay never eats a click during play, but it reads as a broken hotkey.
+
+On Wayland the ordinary X11 key hook is blind while the *native Wayland* game holds focus, so there
+is an evdev fallback that reads `/dev/input/event*` directly. It requires no extra permission on
+most systems, since the input group normally owns those devices. If hold-to-interact does not work,
+check the startup log:
+
+```
+[linux-interact] F: uiohook=ok evdev=ok
+```
+
+If in-game `F3` does not toggle the overlay, that is expected on Wayland — X11 never sees the
+keypress. Bind a desktop shortcut to `./sc-overlay-linux.sh toggle` instead, which is what the
+`--toggle-overlay` second-instance handler in `electron/main.cjs` exists for.
 
 ## Development notes
 
