@@ -58,7 +58,13 @@ function writeFgPs1() {
 // Prefer the long-lived watcher (foreground.cjs): it already knows the answer, so the common case
 // costs nothing. The spawn below is now only the cold-start / helper-died fallback — it used to
 // run on EVERY tick, i.e. ~20 PowerShell launches a minute for one HWND.
-const fgWatch = require("./foreground.cjs");
+const fgWatch = require(process.platform === "linux" ? "./foreground-linux.cjs" : "./foreground.cjs");
+// 🔑 On Linux, capture CANNOT go through Electron's desktopCapturer. Star Citizen runs as a
+// native Wayland window here, the overlay is an X11 client under XWayland, and Chromium's X11
+// capture path returns a pure black frame for a compositor surface it does not own (measured:
+// 3840x1607, exactly 1 unique colour). capture-linux.cjs grabs the frame from the compositor
+// instead, which sees every surface. The seam is identical, so this is a provider swap.
+const linuxCapture = process.platform === "linux" ? require("./capture-linux.cjs") : null;
 const { readBars, pixelsOf } = require("./rep-bars.cjs");
 /* 🔑 WHICH REFUSALS ARE WORTH REPORTING IS THE SIDECAR'S CALL, not ours. It used to be an
    ACTIONABLE_REP_REFUSALS set right here — a second copy of src/rep-page.ts's own refusal
@@ -80,6 +86,9 @@ function foregroundWindow() {
 // Capture the display the GAME window is on (matched by display_id), at that monitor's full
 // resolution → nativeImage. Falls back to the primary / sources[0] if the match fails.
 async function captureGame(winRect) {
+  // The compositor grab knows nothing about Electron's display ids, so it resolves the monitor
+  // itself from the game window's rect and reports onPrimary on the same contract as below.
+  if (linuxCapture) return linuxCapture.captureGameLinux(winRect, { nativeImage, screen });
   const disp = winRect ? screen.getDisplayMatching(winRect) : screen.getPrimaryDisplay();
   const width = Math.round(disp.size.width * disp.scaleFactor);
   const height = Math.round(disp.size.height * disp.scaleFactor);

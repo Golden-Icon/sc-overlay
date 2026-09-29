@@ -12,6 +12,7 @@
 // usable the caller falls back to the existing log-based behaviour.
 
 import { execFile, spawn } from "node:child_process";
+import { ocrImageLinux, linuxSignal, resetLinuxSignal } from "./screen-read-linux.js";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -431,6 +432,18 @@ export interface OcrHealth {
  *  engine is broken, we cannot prove what broke it, and talking someone into disabling their
  *  protection over what turns out to be a missing language pack is a bad trade. */
 function selfTestReason(): string {
+  // 🔑 PLATFORM SEAM, second half. On Linux the engine is tesseract, and every signal below
+  // describes the Windows warm PowerShell worker — which was never started, so all of them are
+  // false negatives. Reporting "Windows PowerShell could not be found" to a Linux user is the
+  // same class of bug as the one this branch exists to fix: a green engine, a red diagnostic, and
+  // a support thread about a machine that has nothing wrong with it. Each cause below needs a
+  // DIFFERENT fix from the user, so they stay separate.
+  if (process.platform === "linux") {
+    if (linuxSignal.spawnError === "ENOENT") return "Tesseract could not be found on this PC. Install it with your package manager (Debian/Ubuntu: tesseract-ocr, Arch: tesseract).";
+    if (linuxSignal.spawnError) return `Tesseract refused to start (${linuxSignal.spawnError}).`;
+    if (!linuxSignal.everReady) return "Tesseract is installed but returned no text for the self-test image. If the HUD is what you are reading, note that tesseract needs the image inverted - which this build does for you - and works best on a tight crop.";
+    return "Tesseract ran but read no text from the self-test image.";
+  }
   if (ocrSignal.spawnError === "ENOENT") return "Windows PowerShell could not be found on this PC, and Windows OCR is reached through it.";
   if (ocrSignal.spawnError) return `Windows refused to start the OCR helper (${ocrSignal.spawnError}). Security software blocking it is the usual cause.`;
   if (ocrSignal.exitedBeforeReady) return "The OCR helper started and was shut down again before it could answer. Security software doing that is the usual cause.";
@@ -441,7 +454,10 @@ function selfTestReason(): string {
 /** Ask the engine a question we already know the answer to. */
 export async function ocrSelfTest(): Promise<OcrHealth> {
   const ranAt = new Date().toISOString();
-  const signal = { ...ocrSignal };
+  // Snapshot the signal for the platform that is actually running: the Windows worker is never
+  // started on Linux, so its all-false signal would be reported as a broken engine.
+  if (process.platform === "linux") resetLinuxSignal();
+  const signal = process.platform === "linux" ? { ...linuxSignal } : { ...ocrSignal };
   if (!existsSync(SELFTEST_IMAGE)) {
     // Not the user's problem and not worth alerting on - it means a packaging mistake, so say so
     // plainly rather than letting a missing asset masquerade as broken OCR on their machine.
@@ -465,15 +481,30 @@ export async function ocrSelfTest(): Promise<OcrHealth> {
     ranAt,
     ms,
     reason: ok ? null : selfTestReason(),
-    signal: { ...ocrSignal },
+    signal,
   };
   if (!ok) noteOcrFailure(`self-test FAILED after ${ms}ms - ${health.reason}`);
   else if (!health.matched) noteOcrFailure(`self-test read text but not the expected words (got "${health.text}") - the engine works, its accuracy on this PC may not`);
   return health;
 }
 
-/** Run Windows OCR over an image file, returning lines with bounding boxes. */
+/** Character set offered to tesseract for HUD frames. Digits matter most (mining signatures,
+ *  percentages) but letters must stay in the set because the same seam reads item names and
+ *  mission titles - the readers exact-match those against their own catalogs, so a narrower
+ *  charset would only trade one class of misread for another. */
+const HUD_WHITELIST = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,:;%/-+'#*()[]";
+
+/** Run OCR over an image file, returning lines with bounding boxes.
+ *
+ *  🔑 PLATFORM SEAM. Everything downstream of this call — the mining, fabricator, mission and
+ *  refinery readers — is written against the OcrResult shape and knows nothing about which engine
+ *  produced it. Windows keeps its warm WinRT worker; Linux has no WinRT and no PowerShell, so it
+ *  shells to tesseract (screen-read-linux.ts) instead. Both return per-line boxes, which is what
+ *  the readers actually need — the mining reader hunts for the scan number's own bounding box to
+ *  confirm a read came off a real scan, and that box has to survive the swap.
+ */
 export function ocrImage(imagePath: string): Promise<OcrResult> {
+  if (process.platform === "linux") return ocrImageLinux(imagePath, { whitelist: HUD_WHITELIST });
   const w = ensureOcrWorker();
   if (!w?.stdin) return ocrImageOneShot(imagePath);   // couldn't start one — take the slow road
   const winPath = resolve(imagePath).replace(/\//g, "\\");
