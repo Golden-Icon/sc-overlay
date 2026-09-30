@@ -66,9 +66,10 @@ The app checks for updates on its own, so this is a one-time install.
 
 ## Running on Linux
 
-This is a community port, maintained on the `linux-port` branch. It is not an official build and
-there is no `.deb` — you run it from source. It targets a **native Wayland** session (KDE Plasma /
-KWin) with the game running under Wine.
+This is a community port, maintained on `main`. It is not an official build and there is no `.deb` —
+you run it from source. It targets a **native Wayland** session (KDE Plasma / KWin) with the game
+running under Wine via LUG Wine's experimental Wayland runner, so the game presents as a
+Wayland-native window.
 
 ### Requirements
 
@@ -81,6 +82,19 @@ sudo apt install tesseract-ocr imagemagick spectacle   # tesseract + ImageMagick
 - **ImageMagick** (`magick`) does the cropping, binarising and polarity normalisation.
 - **spectacle**, part of KDE, is what actually grabs the frame.
 
+### First-time setup
+
+From a fresh clone — this is everything, in order:
+
+```bash
+sudo apt install tesseract-ocr imagemagick spectacle   # system deps, see Requirements above
+npm install                                             # Electron, tsx, everything else
+./sc-overlay-linux.sh start
+```
+
+`npm install` is not optional and there is no build step: the app runs from source via `tsx`, so
+there is nothing to compile. Expect the first `npm install` to take a few minutes.
+
 ### Running it
 
 Use the launcher rather than calling Electron directly — it sets the display environment that
@@ -91,6 +105,17 @@ Wayland requires:
 ./sc-overlay-linux.sh toggle    # show/hide the overlay canvas
 ./sc-overlay-linux.sh stop
 ```
+
+### The widget page
+
+The sidecar serves a page with every widget on it at `http://localhost:8778/`. It is a **control
+surface, not a control for the overlay**: the widgets are live and usable there, but ticking one
+does not make it appear in-game and unticking it does not hide it in-game. Those stay separate.
+
+It is served on all interfaces, so you can open it from a phone, tablet or second PC on the same
+network at `http://<this-machine's-ip>:8778/`. Panels can be moved, resized, scaled and stacked
+behind each other; that layout is remembered by the browser that arranged it, in `localStorage`,
+and is never written to the server.
 
 ### Things that will otherwise waste your time
 
