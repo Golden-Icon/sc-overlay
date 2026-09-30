@@ -2357,9 +2357,37 @@ async function handleRequest(req: import("node:http").IncomingMessage, res: Serv
     // Names the path of the player's global.ini on disk — same class as diagnostics/setup.
     "/api/can-embed", "/api/dev/note", "/api/localization",
   ]);
+  // 🟡 REMOTE CONTROL. overlay/index.html is a page of every widget, meant to be opened from a
+  // second machine, and its widgets have to be USABLE there — ticking the ores you are hunting,
+  // editing a note, re-rolling a hauling rate. Each of those is a POST, and the rule above
+  // (mutating = loopback only) would 403 every one of them, leaving a page of read-only widgets
+  // that look interactive and are not.
+  //
+  // So the loopback rule keeps its full force, with an explicit exception list beside it. The list
+  // is written out route by route rather than derived, because the whole value of the rule is
+  // that a reader can see exactly what it permits. Two families stay OFF it, deliberately:
+  //   • /api/config — the credential-bearing whole-config write the 2026-08-09 breach used.
+  //   • /api/chat/* — sending as the user spends their Twitch credential and speaks with their
+  //     voice. That belongs on the machine it happens on, not on a tablet on the sofa.
+  // Everything listed here only changes the user's own widget data on their own server, which the
+  // same server already hands to any reader over HTTP with no authentication at all.
+  const remotelyControllable = new Set([
+    // Mining: which ores count, whether to follow the player into space, drop a job.
+    "/api/mining/target", "/api/mining/place-mode", "/api/mining/remove-job",
+    // Journal / notes.
+    "/api/notes",
+    // Hauling advisor: set a plan, re-roll market rates.
+    "/api/hauling/plan", "/api/hauling/reset-rates",
+    // Event tracker: claim a reward, reset progress.
+    "/api/events/reset", "/api/events/reward",
+    // Loot split sessions.
+    "/api/party", "/api/party/sessions",
+    // Verse finder status and grind tracking.
+    "/api/verse/status", "/api/grind-track",
+  ]);
   const mutating = req.method !== "GET" && req.method !== "HEAD";
   const sensitive = mutating || SENSITIVE_GET.has(url);
-  if (sensitive && !fromThisMachine(req)) {
+  if (sensitive && !fromThisMachine(req) && !remotelyControllable.has(url)) {
     res.writeHead(403, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify({ error: "This endpoint is only available on the machine running SC Overlay." }));
     return;
