@@ -252,11 +252,42 @@ const HEADING_MARGIN = 1.25;
 function findHeading(lines: OcrLine[]): { line: OcrLine; decisive: boolean } | null {
   const sorted = [...lines].filter((l) => l.text.trim().length >= 3).sort((a, b) => b.h - a.h);
   if (!sorted.length) return null;
-  const top = sorted[0];
+  // 🔴 THE LEFT-HAND FACTION LIST IS NOT A HEADING. The page names every giver twice: once as the
+  // big title, and once as a row in the left panel's faction list. The list row is drawn with a
+  // leading marker glyph, which OCR renders as "@ " or similar, and it sits far to the left of the
+  // page body. On Windows the title measured 39-40px against 27px for everything else, so height
+  // alone was decisive. Tesseract reports the LIST ROW as the taller box (53px against the title's
+  // 38px on a 3440x1440 frame), so tallest-wins picked it — and because the section filter keeps
+  // only lines BELOW the heading, choosing a row that sits below the page's own section header made
+  // that header unreachable. Every frame then refused `no-section` on a page being read perfectly.
+  // A line carrying a leading marker glyph is never a heading, whatever its height.
+  const usable = sorted.filter((l) => !/^\s*[^A-Za-z0-9]/.test(l.text));
+  // The aUEC credit readout is the one other line that can rival the title in height, and it is
+  // not page content — it sits in the bottom HUD and is the only such line that is mostly digits.
+  // Measured 34px against the title's 38px, which is inside the 1.25 margin and would otherwise
+  // make every read `heading-not-decisive`.
+  const noCredit = usable.filter((l) => !/^[^0-9]*[\d][\d,.]*\s*$/.test(l.text.trim()));
+  const pool = noCredit.length ? noCredit : usable.length ? usable : sorted;
+  // 🔴 A LIST IS NOT A HEADING, AND HEIGHT ALONE CANNOT TELL THEM APART HERE. On a live page the
+  // reward-column items ("Strata Arms Edition", "Strata Backpack Levski Edition", …) measure 34px
+  // against the title's 39px — a ratio of 1.15, inside the 1.25 margin — so a tallest-wins read
+  // refuses `heading-not-decisive` on a page that is being read perfectly. Loosening the margin
+  // would wreck the Windows calibration the number came from, so it stays.
+  //
+  // The separator is geometric and was already present in every frame: those items are a STACK —
+  // four lines, identical left edge (x=2719), identical height — while the title stands alone at
+  // its own edge (x=1401). A heading is not repeated down a column. So among the lines tall enough
+  // to be the heading, drop any whose left edge and height are shared by another line, and take
+  // the tallest of what is left. Measured 3440x1440: title 39px alone, rivals 34px x4 at one edge.
+  const HEADING_H = pool[0].h;
+  const tall = pool.filter((l) => l.h >= HEADING_H * 0.8);
+  const stacked = tall.filter((l) => tall.some((o) => o !== l && Math.abs(o.x - l.x) < 4 && Math.abs(o.h - l.h) < 4));
+  const solo = tall.filter((l) => !stacked.includes(l));
+  const top = (solo.length ? solo : tall)[0];
   // The runner-up must be meaningfully smaller. Lines that are part of the SAME heading (a
   // wrapped faction name) sit at the same height, so compare against the tallest line that is
   // not on the heading's own row.
-  const other = sorted.find((l) => l !== top && Math.abs(l.y - top.y) > top.h * 0.8);
+  const other = (solo.length ? solo : tall).find((l) => l !== top && Math.abs(l.y - top.y) > top.h * 0.8);
   return { line: top, decisive: !other || top.h >= other.h * HEADING_MARGIN };
 }
 
