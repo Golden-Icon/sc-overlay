@@ -22,3 +22,7 @@ __pycache__/
 
 # Sandbox profile 'npm run test:widgets:sandbox' seeds from tools/fixtures/ and runs the suite in
 .test-profile/
+
+# Pid of the overlay sidecar currently running on this machine. Runtime state, machine-specific,
+# and a different number on every checkout.
+.sc-overlay.pid
