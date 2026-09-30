@@ -1,0 +1,883 @@
+<!doctype html>
+<!--
+  SC Overlay — every widget on one page, your way.
+
+  WHAT THIS IS: a control surface. Open it on a second machine (a tablet, a phone, another PC) at
+  http://<overlay-host>:8778/ and every widget is here, live and usable — tick the ores you are
+  hunting, edit the journal, re-roll hauling rates, claim an event tracker reward.
+
+  WHAT THIS IS NOT: a remote control for the overlay. Ticking a widget here does not make it
+  appear in-game, and unticking it does not hide it in-game. Those are two separate things and
+  this page deliberately does not touch the second one.
+
+  HOW THE WIDGETS STAY USABLE OFF-MACHINE: each panel is the widget's real page in an iframe with
+  ?embedded=1, so the JS here is the JS the overlay runs, talking to the same endpoints. Those
+  calls are POSTs, and POSTs are loopback-only by default; src/overlay-server.ts carries an
+  explicit `remotelyControllable` allowlist for exactly the routes a widget needs to be operated
+  from another machine. So there is no duplicate widget logic here to drift out of sync.
+
+  ALL OF IT IS REMEMBERED BY THIS BROWSER ONLY, in one localStorage key: which widgets are
+  ticked, each panel's size, where each panel sits, the scale, and the stacks. Nothing about
+  laying out this page is written to the server.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SC Overlay — Widgets</title>
+<style>
+  /* Near-black on purpose. This page sits next to a running game and gets glanced at, and a light
+     page next to a dark overlay is genuinely hard on the eyes. Accent colours are lifted from
+     overlay/mining.html so this reads as part of the app rather than something pasted next to it. */
+  :root {
+    --cyan: #45D0E0; --bg: #07080a; --card: #0e1115; --head: #131820;
+    --line: #1e262e; --text: #c8d4dc; --dim: #7d8f9c; --faint: #46535d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 16px;
+    font: 13px/1.45 "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+       color: var(--cyan); margin: 0; }
+  .sub { color: var(--dim); font-size: 12px; }
+  .host { color: var(--faint); font-size: 11px; margin-left: auto; }
+
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  button {
+    background: var(--card); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 11px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: #2b3742; background: var(--head); }
+  button.on { background: #10262b; border-color: #24525b; color: var(--cyan); }
+  .field { display: inline-flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
+  .field input[type=range] { accent-color: var(--cyan); width: 130px; }
+  .val { color: var(--cyan); font-variant-numeric: tabular-nums; min-width: 34px; }
+  #status { color: var(--dim); font-size: 12px; margin-left: auto; }
+  #status.err { color: #ff8478; }
+
+  /* 🔑 THE WIDGET PICKER. One checkbox per widget, any combination — the list that says which
+     widgets are on THIS page right now. A real <label> wrapping a real checkbox, so the whole
+     pill is the hit target and it is keyboard- and screen-reader-legible for free. */
+  .chips { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 16px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none;
+    background: var(--card); border: 1px solid var(--line); color: var(--dim);
+    border-radius: 999px; padding: 5px 13px 5px 10px; font-size: 12px;
+  }
+  .chip:hover { border-color: #2b3742; }
+  .chip input { margin: 0; accent-color: var(--cyan); cursor: pointer; }
+  .chip:has(input:checked) { background: #10262b; border-color: #24525b; color: var(--text); }
+  .chip:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  /* 🔑 THE STACK DROPDOWN, and it is PER WIDGET. Every panel's header carries its own ▸ button;
+     the list it opens is the widgets you could put BEHIND THAT ONE. A single global stack list
+     was the wrong shape: adding a widget meant deciding, up front and on a different part of the
+     page, which panel it belonged to. Here you stand on the panel you care about and add to it. */
+  .pop {
+    position: fixed; z-index: 60; min-width: 230px; max-height: 62vh; overflow-y: auto; padding: 6px;
+    background: #10151b; border: 1px solid #2b3742; border-radius: 8px;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, .6);
+  }
+  .pop[hidden] { display: none; }
+  .pop h4 { margin: 6px 7px 5px; font-size: 10px; font-weight: 600; letter-spacing: .06em;
+            text-transform: uppercase; color: var(--faint); }
+  .pop label {
+    display: flex; align-items: center; gap: 9px; padding: 5px 7px; border-radius: 5px;
+    cursor: pointer; font-size: 12px; color: var(--text);
+  }
+  .pop label:hover { background: var(--head); }
+  .pop label input { margin: 0; accent-color: var(--cyan); cursor: pointer; }
+  .pop label.self { color: var(--faint); cursor: default; }
+  .pop label.self input { cursor: default; }
+  .pop .none { color: var(--faint); padding: 5px 7px; font-size: 11px; }
+  .pop hr { border: 0; border-top: 1px solid var(--line); margin: 5px 2px; }
+
+  /* A free-form grid: panels keep the width you dragged them to, and wrap onto the next row when
+     they run out of room. `align-items: start` so a short panel does not stretch to match a tall
+     one beside it, which is the whole reason to be able to resize in the first place. */
+  .grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; }
+
+  /* FREE LAYOUT. Once you have dragged something the page stops deciding where panels go and
+     starts obeying you: the grid becomes a positioned surface, each panel sits at the x/y you
+     dropped it, and the grid grows to the depth of the lowest panel so the page still scrolls. */
+  .grid.free { position: relative; display: block; height: var(--boardH, 400px); }
+  .grid.free .card { position: absolute; left: 0; top: 0;
+                     transform: translate(var(--x, 0px), var(--y, 0px)); }
+
+  /* 🔑 Z-ORDER. Without this every panel sits at z-index:auto, so the one painted last wins —
+     which is DOM order, which is the order of the WIDGETS list at the top of this file. That is
+     why a panel you had just opened could end up underneath one you had open all evening, and why
+     there was no way to choose: nothing about the DOM changes when you move something, and in
+     free layout panels can genuinely sit on top of each other, so "which is on top" has to be
+     state rather than an accident of where a widget happens to be listed.
+     `--z` is assigned from S.order (see bringToFront). It is read by BOTH layouts on purpose:
+     flex items honour z-index even when position:static, so the order you built up carries over
+     the moment the page goes to free layout instead of resetting to the picker order. */
+  .card { z-index: var(--z, 1); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 9px;
+    display: flex; flex-direction: column; overflow: hidden; position: relative;
+    flex: 0 0 auto; min-width: 260px;
+  }
+  .head { display: flex; align-items: center; gap: 7px; padding: 8px 10px;
+          background: var(--head); border-bottom: 1px solid var(--line); flex: none;
+          cursor: grab; touch-action: none; user-select: none; }
+  body.dragging .head { cursor: grabbing; }
+  /* The move handle. A stack's header is almost entirely tabs, and tabs are things you click, so
+     "drag anywhere in the header" cannot work for a stack — there is nowhere left to grab. This
+     div is not a control, so the "don't drag a button" rule never swallows it. */
+  .drag { color: #38434c; cursor: grab; user-select: none; touch-action: none;
+          font-size: 13px; line-height: 1; padding: 0 3px; flex: none; }
+  .drag:hover { color: var(--cyan); }
+  body.dragging .drag { cursor: grabbing; }
+  .name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden;
+          text-overflow: ellipsis; }
+  .tag { color: var(--faint); font-size: 11px; white-space: nowrap; }
+  .spacer { margin-left: auto; }
+  .open { color: var(--faint); text-decoration: none; font-size: 11px; white-space: nowrap; }
+  .open:hover { color: var(--cyan); }
+  .head button, .head a { cursor: pointer; }
+  .sbtn { padding: 2px 7px; font-size: 11px; line-height: 1.4; flex: none; }
+
+  /* A stack's tab strip sits in its header, exactly where the overlay puts it. */
+  .tabs { display: flex; gap: 3px; overflow-x: auto; flex: 1 1 auto; scrollbar-width: thin; }
+  .tab { background: transparent; border: 1px solid transparent; border-radius: 5px;
+         color: var(--faint); font-size: 11px; padding: 3px 8px; white-space: nowrap; }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] { background: #10262b; border-color: #24525b; color: var(--cyan); }
+
+  /* The widget's own page, ?embedded=1 — the same mode the overlay canvas uses, so it drops its
+     chrome and fills whatever box it is given. The frame is exactly the size of this box; the
+     scale is applied to the frame's contents, so nothing here is scaled and there is nothing
+     here to crop. */
+  .view { position: relative; background: #0a0d10; overflow: hidden; flex: 1 1 auto; }
+  .view iframe { position: absolute; top: 0; left: 0; border: 0; display: block;
+                 background: transparent; transform-origin: top left; }
+  .frame[hidden] { display: none; }
+
+  /* Drag handles, bottom-right corner and right edge — the same affordance the overlay canvas
+     gives every widget frame. `touch-action: none` is what lets a touch drag resize or move
+     instead of scrolling the page, which is the whole reason a phone needs it spelled out. */
+  .grip { position: absolute; z-index: 5; touch-action: none; }
+  .grip.se { right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize;
+             background: linear-gradient(135deg, transparent 50%, #2b3742 50%, #2b3742 62%,
+                         transparent 62%, transparent 74%, #2b3742 74%, #2b3742 86%, transparent 86%); }
+  .grip.e { right: 0; top: 34px; bottom: 0; width: 8px; cursor: ew-resize; }
+  body.dragging { user-select: none; }
+  body.dragging .view { pointer-events: none; }  /* a drag must not land inside a live widget */
+
+  footer { margin-top: 18px; color: var(--faint); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SC Overlay</h1>
+  <span class="sub">pick your widgets, size them, move them, stack them</span>
+  <span class="host" id="host"></span>
+</header>
+
+<div class="bar">
+  <button type="button" id="reload">Reload shown</button>
+  <button type="button" id="freeMode">Tidy up</button>
+  <button type="button" id="clear">Clear</button>
+  <label class="field" for="scale">scale
+    <input type="range" id="scale" min="0.4" max="1.6" step="0.05">
+    <span class="val" id="scaleVal"></span>
+  </label>
+  <span id="status"></span>
+</div>
+
+<div class="chips" id="chips"></div>
+<div class="grid" id="grid"></div>
+<!-- One popover, reused for whichever panel's ▸ button opened it. Fixed-positioned and placed
+     against the button, so it is never clipped by the panel's own overflow:hidden. -->
+<div class="pop" id="pop" hidden role="group"></div>
+
+<footer>Drag a panel's header (or its ⣿ grip) to move it; drag the bottom-right corner to size it,
+  the right edge for width only. Panels overlap freely and whichever one you moved last is on top,
+  so drag a covering panel aside to reach what is under it. A panel's <b>▸</b> button lists the
+  widgets you can stack behind it — tick one to add it, untick to take it back out. Everything here
+  is remembered by this browser only, and none of it changes what the overlay shows in-game.</footer>
+
+<script>
+// `page` is the widget's own page. `w`/`h` are the panel's starting size in CSS pixels.
+const WIDGETS = [
+  { key: "mining",       name: "Mining Scanner",     page: "mining.html",        w: 620, h: 560 },
+  { key: "hauling",      name: "Hauling Advisor",    page: "hauling.html",       w: 560, h: 560 },
+  { key: "battaglia",    name: "Event Tracker",      page: "battaglia.html",     w: 520, h: 480 },
+  { key: "party",        name: "Loot Split",         page: "party.html",         w: 480, h: 440 },
+  { key: "logView",      name: "Log",                page: "logview.html",       w: 520, h: 460 },
+  { key: "verseFinder",  name: "Verse Finder",       page: "versefinder.html",   w: 480, h: 440 },
+  { key: "notepad",      name: "Journal",            page: "notepad.html",       w: 480, h: 460 },
+  { key: "scFeed",       name: "SC Feed",            page: "scfeed.html",        w: 460, h: 520 },
+  { key: "twitchChat",   name: "Twitch Chat",        page: "twitchchat.html",    w: 420, h: 480 },
+  { key: "unlockAlert",  name: "Unlock Alerts",      page: "unlockalert.html",   w: 420, h: 300 },
+  { key: "bindingChart", name: "Infographic Viewer", page: "bindingwidget.html", w: 520, h: 520 },
+  { key: "payoutScan",   name: "Payout Scan",        page: "payout-scan.html",   w: 520, h: 500 },
+  // 🔑 missions.html IS THE HUB, not a widget: it loads canvas.js and its Mission & BP Tracker
+  // (#panel) is drawn by the canvas document itself, not by an embedded page. It needs the
+  // HUB_FILL treatment below — see there for why resizing it did nothing at all before.
+  { key: "missions",     name: "Missions",           page: "missions.html",      w: 900, h: 620 },
+  { key: "webView",      name: "Web Page",           page: "webview.html",       w: 520, h: 480 },
+  // Chat writes as the user, and the server keeps /api/chat/* loopback-only on purpose, so from
+  // another machine it will read but not send.
+  { key: "chat",         name: "Chat",               page: "chat.html",          w: 460, h: 520,
+    tag: "send is local-only" },
+];
+
+const $ = (id) => document.getElementById(id);
+const KEY = "sc-overlay.index.v4";
+const MIN_W = 260, MIN_H = 180, MAX_W = 4000, MAX_H = 3000;
+
+const byKey = {};
+for (const w of WIDGETS) byKey[w.key] = w;
+
+// ── persisted state ────────────────────────────────────────────────────────────────────────────
+// One object, one key. Merged with defaults rather than trusted: a hand-edited or stale entry
+// must not leave a widget without a size, because a panel with no size is a panel with no frame.
+const defaults = () => ({
+  shown: WIDGETS.map((w) => w.key),
+  size: Object.fromEntries(WIDGETS.map((w) => [w.key, { w: w.w, h: w.h }])),
+  stacks: [],           // [{ id, members: [key…], active: key }] — anchor is members[0]
+  pos: {},              // free layout: panelId -> { x, y }; id is "k:<key>" or "s:<stackId>"
+  order: [],            // panel ids, BACK to FRONT. Absent id = behind everything listed here.
+  free: false,
+  scale: 0.8,
+});
+let S = defaults();
+try {
+  const raw = JSON.parse(localStorage.getItem(KEY) || "null");
+  if (raw && typeof raw === "object") {
+    const d = defaults();
+    S = { ...d, ...raw, size: { ...d.size, ...(raw.size || {}) } };
+    if (!Array.isArray(S.shown)) S.shown = d.shown;
+    if (!raw.pos || typeof raw.pos !== "object") S.pos = {};
+    if (!Array.isArray(S.order)) S.order = [];
+    S.order = S.order.filter((id) => typeof id === "string");
+    if (Array.isArray(raw.stacks)) S.stacks = raw.stacks;
+  }
+} catch { /* first visit, or storage disabled */ }
+
+// A stack exists only with two or more members, and only for widgets that are still on the page
+// and not already in another stack. Cured once, here, so no other function has to re-check it —
+// and note it is applied to the LOADED state, never to a set the user is in the middle of
+// building: an earlier version cleared a one-item set on every tick, which made it impossible to
+// stack two widgets by clicking, because the first tick undid itself.
+S.shown = S.shown.filter((k) => byKey[k]);
+S.stacks = (S.stacks || [])
+  .map((s, i) => ({ id: s.id || "s" + i, members: (s.members || []).filter((k) => byKey[k]), active: s.active }))
+  .filter((s) => s.members.length >= 2);
+const claimed = new Set();
+for (const s of S.stacks) {
+  s.members = s.members.filter((k) => S.shown.includes(k) && !claimed.has(k));
+  if (s.members.length < 2) continue;
+  s.members.forEach((k) => claimed.add(k));
+  if (!s.members.includes(s.active)) s.active = s.members[0];
+}
+S.stacks = S.stacks.filter((s) => s.members.length >= 2);
+
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch { /* private mode */ } };
+const sizeOf = (k) => S.size[k] || { w: byKey[k].w, h: byKey[k].h };
+const isShown = (k) => S.shown.includes(k);
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+/** The stack a widget belongs to, or null. Every member of a stack answers the same stack, so the
+ *  dropdown on any member of a stack edits that stack — you never have to find the "owner". */
+const stackOf = (k) => S.stacks.find((s) => s.members.includes(k)) || null;
+const stacked = (k) => !!stackOf(k);
+const nextStackId = () => "s" + (S.stacks.reduce((m, s) => Math.max(m, +(String(s.id).slice(1)) || 0), 0) + 1);
+
+const cards = {};        // widget key -> { card, view, frame, natural }
+const stackCards = {};   // stack id  -> { card, view, tabs, open, sbtn }
+
+// ── the widget picker ─────────────────────────────────────────────────────────────────────────
+function buildChips() {
+  const chips = $("chips");
+  for (const w of WIDGETS) {
+    const chip = document.createElement("label");
+    chip.className = "chip";
+    chip.innerHTML = '<input type="checkbox"><span></span>';
+    chip.querySelector("span").textContent = w.name;
+    const box = chip.querySelector("input");
+    box.checked = isShown(w.key);
+    box.addEventListener("change", () => {
+      if (box.checked) { if (!S.shown.includes(w.key)) S.shown.push(w.key); }
+      else {
+        S.shown = S.shown.filter((k) => k !== w.key);
+        // A widget taken off the page leaves its stack, or the stack would hold a tab for
+        // something that is not there.
+        for (const s of S.stacks) s.members = s.members.filter((m) => m !== w.key);
+        S.stacks = S.stacks.filter((s) => s.members.length >= 2);
+      }
+      save(); relayout();
+    });
+    chips.appendChild(chip);
+  }
+}
+
+// ── scaling ───────────────────────────────────────────────────────────────────────────────────
+/** Lay a widget's document out at view/scale and paint it at scale, so it fills the panel exactly
+ *  while its own layout is `scale` times roomier. That is what makes the slider show MORE of a
+ *  widget rather than the same rows in smaller type, and it is why every page here behaves like
+ *  mining and hauling already did. */
+function sizeFrame(frame, viewW, viewH) {
+  const z = clamp(Number(S.scale) || 0.8, 0.4, 1.6);
+  frame.style.width = viewW / z + "px";
+  frame.style.height = viewH / z + "px";
+  frame.style.transform = "scale(" + z + ")";
+}
+
+/** 🔑 THE MISSIONS PANEL, AND WHY RESIZING IT DID NOTHING.
+ *
+ *  missions.html is not a widget page — it is the overlay's own shell, and the Mission & BP
+ *  Tracker you want is its #panel, drawn by the canvas document itself. Measured, that panel is
+ *  380x662 in EVERY box: its own stylesheet pins `width: 380px` and gives it content height, and
+ *  the rules that would make it responsive (`#panel.canvas`, sized by --ww/--wh) only apply in
+ *  canvas mode, which needs `?canvas=1`. Embedded on its own it never got that, so it sat at
+ *  380x662 in the middle of whatever frame it was given — the space around it you saw. Dragging
+ *  the corner could not change it, because there was nothing for the drag to act on.
+ *
+ *  An earlier attempt "fixed" this by measuring the document's natural size (1123x725 — the whole
+ *  shell, widget bar included) and scaling to fit, which made it WORSE and read as a scale
+ *  problem: the panel shrank to nothing and the numbers changed but the tracker did not. It was
+ *  never a scaling problem. The document does not need scaling at all; #panel needs to be allowed
+ *  to fill the box and scroll, exactly as it does in canvas mode.
+ *
+ *  Injected rather than edited into missions.html, so the overlay's own page is untouched and
+ *  there is no way for this to affect the in-game shell. Everything is scoped to #panel and its
+ *  own furniture, and `!important` is here because the rules being overridden are the page's own
+ *  high-specificity ones.
+ *
+ *  The tracker's own bottom bar (.whood) is removed, and the reason is not cosmetic: its buttons
+ *  are wired in canvas.js inside `if (CANVAS)`, so outside canvas mode the cog, the move grip and
+ *  the reset are all DEAD — the same is true of the standalone missions.html page, so this is
+ *  pre-existing and not something the fill causes. It also sits at `top: 100%`, i.e. 28px below
+ *  the panel, which is off the bottom of a frame. Showing a settings cog that opens nothing would
+ *  be worse than showing none; the tracker's settings are reachable from its own page via the
+ *  panel's "open" link. The canvas's other furniture goes with it: the arrange banner, the corner
+ *  resize handle and the brand folder-tab, all of which either duplicate what this page already
+ *  provides or hang outside the panel.
+ */
+const HUB_FILL = `
+  html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+  #panel { width: auto !important; max-width: none !important; margin: 0 !important;
+           height: 100% !important; max-height: none !important;
+           display: flex !important; flex-direction: column !important; }
+  #panel .pool { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .whood, #cogMenu, #grip, #bpClose, #moveBanner, #resizeHandle, .brandtab,
+  #hub, .trinket, #tray { display: none !important; }
+`;
+
+/** Same-origin, so the hub's own document is reachable. Injected on load and again after any
+ *  document replacement, because a load throws away everything that was in the old one. */
+function dressFrame(frame, key) {
+  if (byKey[key].page !== "missions.html") return;
+  try {
+    const d = frame.contentDocument;
+    if (!d || !d.head) return;
+    if (d.getElementById("hubfill")) return;
+    const st = d.createElement("style");
+    st.id = "hubfill";
+    st.textContent = HUB_FILL;
+    d.head.appendChild(st);
+  } catch { /* not loaded yet — the load listener re-runs this */ }
+}
+
+function sizeCard(key, w, h) {
+  const c = cards[key]; if (!c) return;
+  c.card.style.width = w + "px";
+  c.card.style.height = h + "px";
+  const vw = c.view.clientWidth, vh = c.view.clientHeight;
+  c.frame._vw = vw; c.frame._vh = vh;
+  sizeFrame(c.frame, vw, vh);
+}
+function sizeStackCard(sc, w, h) {
+  sc.card.style.width = w + "px";
+  sc.card.style.height = h + "px";
+  const vw = sc.view.clientWidth, vh = sc.view.clientHeight;
+  for (const k of sc.s.members) {
+    const c = cards[k]; if (!c) continue;
+    c.frame._vw = vw; c.frame._vh = vh;
+    sizeFrame(c.frame, vw, vh);
+  }
+}
+function applyScale() {
+  const z = clamp(Number(S.scale) || 0.8, 0.4, 1.6);
+  $("scale").value = z;
+  $("scaleVal").textContent = Math.round(z * 100) + "%";
+  for (const k in cards) sizeCard(k, sizeOf(k).w, sizeOf(k).h);
+  for (const id in stackCards) sizeStackCard(stackCards[id], stackCards[id].w, stackCards[id].h);
+}
+
+// ── panels ─────────────────────────────────────────────────────────────────────────────────────
+function newFrame(key) {
+  const f = document.createElement("iframe");
+  f.className = "frame";
+  f.title = byKey[key].name;
+  f.loading = "lazy";
+  f.src = byKey[key].page + "?embedded=1";
+  // A load replaces the document, so anything injected into the old one is gone with it. This is
+  // the one place the hub is dressed, which is why a reload does not undo it.
+  f.addEventListener("load", () => { dressFrame(f, key); sizeFrame(f, f._vw || 0, f._vh || 0); });
+  return f;
+}
+function makeCard(key) {
+  const w = byKey[key];
+  const card = document.createElement("div");
+  card.className = "card";
+  card.dataset.key = key;
+  card.innerHTML =
+    '<div class="head"><span class="drag" title="drag to move">⣿</span><span class="name"></span>' +
+    (w.tag ? '<span class="tag"></span>' : "") + '<span class="spacer"></span>' +
+    '<button class="sbtn" type="button" title="stack another widget behind this one">▸ stack</button>' +
+    '<a class="open" target="_blank" rel="noopener">open</a></div>' +
+    '<div class="view"></div><div class="grip e"></div><div class="grip se"></div>';
+  card.querySelector(".name").textContent = w.name;
+  if (w.tag) card.querySelector(".tag").textContent = w.tag;
+  card.querySelector(".open").href = w.page;
+
+  const view = card.querySelector(".view");
+  const frame = newFrame(key);
+  view.appendChild(frame);
+
+  const sbtn = card.querySelector(".sbtn");
+  sbtn.addEventListener("click", (e) => { e.stopPropagation(); openStackMenu(key, sbtn); });
+  attachDrag(card, "k:" + key);
+  cards[key] = { card, view, frame, sbtn };
+  return card;
+}
+function makeStackCard(s) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.dataset.stack = s.id;
+  card.innerHTML = '<div class="head"><span class="drag" title="drag to move">⣿</span>' +
+    '<div class="tabs" role="tablist"></div>' +
+    '<button class="sbtn" type="button" title="stack another widget behind this one">▸ stack</button>' +
+    '<a class="open" target="_blank" rel="noopener">open</a></div>' +
+    '<div class="view"></div><div class="grip e"></div><div class="grip se"></div>';
+  const sbtn = card.querySelector(".sbtn");
+  sbtn.addEventListener("click", (e) => { e.stopPropagation(); openStackMenu(s.members[0], sbtn); });
+  attachDrag(card, "s:" + s.id);
+  const entry = { card, view: card.querySelector(".view"), tabs: card.querySelector(".tabs"),
+                  open: card.querySelector(".open"), sbtn, s, w: 0, h: 0 };
+  stackCards[s.id] = entry;
+  return entry;
+}
+
+/** Wire the two gestures: drag the header to MOVE, drag a grip to SIZE. A pointerdown on a
+ *  control in the header is left alone — the tabs, the stack button and the open link are things
+ *  you click. */
+function attachDrag(card, id) {
+  card.querySelector(".head").addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button, select, a, input")) return;
+    // The first move of any panel turns the page from flow into free layout, and must not also
+    // teleport the panel: toFree() has already frozen where the browser laid it out, so the
+    // delta about to be dragged lands on the position it already occupies.
+    toFree();
+    startDrag(e, "move", id);
+  });
+  card.querySelector(".grip.se").addEventListener("pointerdown", (e) => startDrag(e, "size", id, true));
+  card.querySelector(".grip.e").addEventListener("pointerdown", (e) => startDrag(e, "size", id, false));
+}
+
+// ── 🔑 THE PER-WIDGET STACK DROPDOWN ───────────────────────────────────────────────────────────
+/** Opens on the panel whose ▸ button you pressed. Two lists, because there are two questions:
+ *
+ *    IN THIS STACK — the widgets already sharing this panel. Ticked. Untick to take one out, which
+ *      is the only way out and needs no hunting: the widget you want to remove is right there,
+ *      ticked, in the dropdown of the panel it is hiding behind.
+ *    AVAILABLE — the widgets currently on the page that are in NO stack. Unticked. Tick one and it
+ *      joins THIS panel's stack, because this is the panel you opened the list from. A widget
+ *      already in some other stack is not listed: it cannot be in two, and hiding that here is
+ *      better than a greyed-out row that looks broken.
+ *
+ *  Opening the dropdown on any member of a stack edits that stack, so a stack is never owned by
+ *  one privileged panel you have to find first. */
+function openStackMenu(anchorKey, btn) {
+  const pop = $("pop");
+  const st = stackOf(anchorKey);
+  pop.textContent = "";
+
+  if (st) {
+    const h1 = document.createElement("h4");
+    h1.textContent = "in this stack";
+    pop.appendChild(h1);
+    for (const k of st.members) {
+      const lab = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = true;
+      box.disabled = k === anchorKey;
+      const name = document.createElement("span");
+      name.textContent = byKey[k].name;
+      if (k === anchorKey) {
+        lab.className = "self";
+        const tag = document.createElement("span");
+        tag.textContent = " (this panel)";
+        name.appendChild(tag);
+      } else {
+        box.addEventListener("change", () => { toggleStackMember(st, k, false); });
+      }
+      lab.appendChild(box); lab.appendChild(name);
+      pop.appendChild(lab);
+    }
+    pop.appendChild(document.createElement("hr"));
+  }
+
+  const h2 = document.createElement("h4");
+  h2.textContent = st ? "add to this stack" : "stack behind this widget";
+  pop.appendChild(h2);
+  // 🔑 THE ANCHOR IS EXCLUDED BY NAME, not by its stack membership. A widget that is currently
+  // solo is by definition not in any stack, so a membership-only filter listed the panel you
+  // opened this list FROM as a candidate to stack behind itself — and ticking it produced a
+  // two-tab stack of one widget with itself, which is a loop, not a stack.
+  const free = WIDGETS.filter((w) => isShown(w.key) && !stacked(w.key) && w.key !== anchorKey);
+  if (!free.length) {
+    const n = document.createElement("div");
+    n.className = "none";
+    n.textContent = st ? "every other widget is already stacked" : "no other unstacked widgets";
+    pop.appendChild(n);
+  }
+  for (const w of free) {
+    const lab = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = false;
+    const name = document.createElement("span");
+    name.textContent = w.name;
+    box.addEventListener("change", () => { toggleStackMember(st, w.key, true); });
+    lab.appendChild(box); lab.appendChild(name);
+    pop.appendChild(lab);
+  }
+
+  pop.hidden = false;
+  // Fixed positioning against the button, so the panel's overflow:hidden can never clip it.
+  const r = btn.getBoundingClientRect();
+  pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8) + "px";
+  pop.style.top = (r.bottom + 6) + "px";
+  pop._anchor = anchorKey;
+}
+function closeStackMenu() { const p = $("pop"); p.hidden = true; p._anchor = null; }
+
+/** Add or remove one widget from one stack. `st` may be null, meaning "this widget is solo and
+ *  something is being stacked behind it", in which case the stack is created here with the widget
+ *  you opened the dropdown on as its first member — which is why the dropdown belongs to a panel. */
+function toggleStackMember(st, key, add) {
+  if (add) {
+    if (stacked(key)) return;
+    const s = st || { id: nextStackId(), members: [], active: "" };
+    if (!s.members.length) { s.members.push(popAnchor()); s.active = popAnchor(); }
+    s.members.push(key);
+    if (!st) S.stacks.push(s);
+  } else {
+    if (!st) return;
+    st.members = st.members.filter((k) => k !== key);
+    if (!st.members.includes(st.active)) st.active = st.members[0] || "";
+    // One member is not a stack, it is a widget on its own again. This is the exit.
+    if (st.members.length < 2) S.stacks = S.stacks.filter((x) => x !== st);
+  }
+  save(); relayout();
+  // The list is rebuilt, because adding or removing changes what belongs in it. Focus is carried
+  // across by hand: a rebuild otherwise drops keyboard users back at the top of the document,
+  // which is what made the earlier global menu unusable without a mouse.
+  const a = popAnchor();
+  const btn = a && byKey[a] ? stackAnchorBtn(a) : null;
+  if (a && byKey[a] && btn) openStackMenu(a, btn);
+  else closeStackMenu();
+}
+function popAnchor() { return $("pop")._anchor; }
+/** The ▸ button that owns a widget's dropdown: its own panel's if it has one, else the panel of
+ *  whatever stack it is in. */
+function stackAnchorBtn(key) {
+  if (cards[key] && cards[key].card.isConnected) return cards[key].sbtn;
+  const st = stackOf(key);
+  const sc = st && stackCards[st.id];
+  return (sc && sc.sbtn) || null;
+}
+document.addEventListener("click", (e) => {
+  if (!$("pop").contains(e.target) && !e.target.closest(".sbtn")) closeStackMenu();
+});
+$("pop").addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeStackMenu(); });
+
+// ── layout ─────────────────────────────────────────────────────────────────────────────────────
+function relayout() {
+  const grid = $("grid");
+  grid.textContent = "";
+  for (const id in stackCards) delete stackCards[id];
+
+  const done = new Set();
+  for (const w of WIDGETS) {
+    if (!isShown(w.key) || done.has(w.key)) continue;
+    const st = stackOf(w.key);
+    if (!st) { grid.appendChild(makeCard(w.key)); done.add(w.key); continue; }
+    if (stackCards[st.id]) continue;              // this stack is already on the page
+    const sc = makeStackCard(st);
+    for (const k of st.members) {
+      if (!isShown(k)) continue;
+      if (!cards[k]) makeCard(k);
+      // Re-home the member's frame into the stack's view, so a stacked widget keeps its own live
+      // document and its event stream rather than reloading on every tab click.
+      sc.view.appendChild(cards[k].frame);
+      done.add(k);
+    }
+    grid.appendChild(sc.card);
+  }
+
+  // ORDER MATTERS: tabs first. Filling the tab strip makes a stack's header taller, and panel
+  // sizes are about the box that header leaves. Tabbing after sizing left stacked frames taller
+  // than the panel holding them.
+  syncTabs();
+  sizeAll();
+  paintZ();
+  if (S.free) placeFree();
+  else { $("freeMode").textContent = "Tidy up"; $("freeMode").classList.remove("on"); }
+  paintStatus();
+}
+
+/** A stack is sized by its largest member, and then every member is set TO that size: a member
+ *  keeping a different size would show a differently-shaped widget in the same frame when you
+ *  switch to it. Its own size is remembered, so unstacking returns the box it had. */
+function stackSizeOf(st) {
+  let w = 0, h = 0;
+  for (const k of st.members) { const z = sizeOf(k); w = Math.max(w, z.w); h = Math.max(h, z.h); }
+  return { w: Math.max(MIN_W, w), h: Math.max(MIN_H, h) };
+}
+function sizeAll() {
+  for (const k in cards) if (isShown(k) && !stacked(k)) sizeCard(k, sizeOf(k).w, sizeOf(k).h);
+  for (const id in stackCards) {
+    const sc = stackCards[id];
+    const sz = stackSizeOf(sc.s);
+    sc.w = sz.w; sc.h = sz.h;
+    sizeStackCard(sc, sz.w, sz.h);
+  }
+  // Cards that exist only because a stack needed their frame still need a size.
+  for (const k in cards) if (!isShown(k) || stacked(k)) { /* sized via the stack above */ }
+  for (const k in cards) {
+    const sbtn = cards[k].sbtn;
+    if (sbtn) sbtn.classList.toggle("on", stacked(k));
+  }
+}
+
+function syncTabs() {
+  for (const id in stackCards) {
+    const sc = stackCards[id];
+    const members = sc.s.members.filter(isShown);
+    if (!members.length) continue;
+    if (!members.includes(sc.s.active)) sc.s.active = members[0];
+    sc.tabs.textContent = "";
+    for (const k of members) {
+      const t = document.createElement("button");
+      t.type = "button"; t.className = "tab"; t.role = "tab";
+      t.textContent = byKey[k].name;
+      t.setAttribute("aria-selected", k === sc.s.active ? "true" : "false");
+      t.addEventListener("click", () => { sc.s.active = k; save(); syncTabs(); });
+      sc.tabs.appendChild(t);
+    }
+    sc.open.href = byKey[sc.s.active].page;
+    for (const k of members) cards[k].frame.hidden = k !== sc.s.active;
+  }
+}
+function paintStatus() {
+  const n = S.shown.length;
+  $("status").textContent = n ? n + " of " + WIDGETS.length + " shown" : "nothing ticked";
+  $("status").className = n ? "" : "err";
+}
+
+// ── z-order ───────────────────────────────────────────────────────────────────────────────────
+/** How deep in the stack a panel sits. Anything not in S.order is BEHIND everything that is,
+ *  which is what keeps a panel you have never touched below the ones you have arranged. */
+const zOf = (id) => S.order.indexOf(id) + 1;
+
+/** 🔑 MOVE A PANEL AND IT COMES TO THE FRONT.
+ *
+ *  This is the whole feature, and it is deliberately on pointerDOWN rather than on pointerup: you
+ *  have to be able to see what you are about to grab. If the z-order only changed when you let
+ *  go, a panel sitting under three others would be picked up from underneath, drag invisibly
+ *  behind them, and only surface once you let go — which looks exactly like the drag not working.
+ *
+ *  Sizing a panel deliberately does NOT raise it. Resizing is a gesture aimed at an edge or a
+ *  corner, not a claim on the foreground, and a stack you are resizing should not jump above
+ *  whatever you had layered over it. */
+function bringToFront(id) {
+  S.order = S.order.filter((x) => x !== id);
+  S.order.push(id);
+  paintZ();
+  save();
+}
+
+/** Writes the stack order onto every panel on the page. Called whenever the order changes and
+ *  after any relayout, because relayout throws the cards away and rebuilds them. */
+function paintZ() {
+  for (const el of document.querySelectorAll("#grid .card")) {
+    const id = el.dataset.key ? "k:" + el.dataset.key : "s:" + el.dataset.stack;
+    el.style.setProperty("--z", zOf(id));
+  }
+}
+
+// ── free layout ────────────────────────────────────────────────────────────────────────────────
+const panelEl = (id) => (id[0] === "s" ? stackCards[id.slice(2)] && stackCards[id.slice(2)].card
+                                        : cards[id.slice(2)] && cards[id.slice(2)].card);
+function placeEl(id) {
+  const el = panelEl(id), p = S.pos[id];
+  if (!el) return;
+  el.style.setProperty("--x", (p ? p.x : 0) + "px");
+  el.style.setProperty("--y", (p ? p.y : 0) + "px");
+  sizeBoard();
+}
+function sizeBoard() {
+  const grid = $("grid");
+  if (!S.free) { grid.style.removeProperty("--boardH"); return; }
+  let maxY = 0;
+  for (const id in S.pos) {
+    const el = panelEl(id);
+    if (!el || el.style.display === "none") continue;
+    maxY = Math.max(maxY, (S.pos[id].y || 0) + el.offsetHeight);
+  }
+  grid.style.setProperty("--boardH", Math.max(320, maxY + 24) + "px");
+}
+/** FLOW → FREE, once. Every panel's position is read off the page as the browser just laid it
+ *  out, and only then does the board switch to absolute. Reading the offsets FIRST is the whole
+ *  trick: the switch is invisible, because each panel's new absolute position is the pixel
+ *  position it already occupied. */
+function toFree() {
+  if (S.free) return;
+  const grid = $("grid");
+  const base = grid.getBoundingClientRect();
+  for (const el of grid.querySelectorAll(".card")) {
+    const id = el.dataset.key ? "k:" + el.dataset.key : "s:" + el.dataset.stack;
+    if (!id) continue;
+    const r = el.getBoundingClientRect();
+    S.pos[id] = { x: Math.round(r.left - base.left), y: Math.round(r.top - base.top) };
+  }
+  S.free = true;
+  grid.classList.add("free");
+  for (const el of grid.querySelectorAll(".card")) {
+    const id = el.dataset.key ? "k:" + el.dataset.key : "s:" + el.dataset.stack;
+    if (id) { el.style.setProperty("--x", S.pos[id].x + "px"); el.style.setProperty("--y", S.pos[id].y + "px"); }
+  }
+  sizeBoard();
+  $("freeMode").textContent = "Free layout — tidy up";
+  $("freeMode").classList.add("on");
+  save();
+}
+function toFlow() {
+  S.free = false; S.pos = {};
+  $("grid").classList.remove("free");
+  $("grid").querySelectorAll(".card").forEach((el) => {
+    el.style.removeProperty("--x"); el.style.removeProperty("--y");
+  });
+  $("freeMode").textContent = "Tidy up";
+  $("freeMode").classList.remove("on");
+  save();
+}
+function placeFree() {
+  const grid = $("grid");
+  grid.classList.add("free");
+  let y = 0;
+  for (const el of Array.from(grid.querySelectorAll(".card"))) {
+    const id = el.dataset.key ? "k:" + el.dataset.key : "s:" + el.dataset.stack;
+    if (!id) continue;
+    if (!S.pos[id]) S.pos[id] = { x: 0, y };
+    placeEl(id);
+    y += el.offsetHeight + 14;
+  }
+  sizeBoard();
+  $("freeMode").textContent = "Free layout — tidy up";
+  $("freeMode").classList.add("on");
+}
+
+// ── dragging ───────────────────────────────────────────────────────────────────────────────────
+/** 🔑 ONE DRAG, TWO JOBS, AND WHY THE ORIGIN IS CAPTURED ONCE.
+ *
+ *  startDrag remembers WHERE THE PANEL WAS AT POINTERDOWN and hands every move the delta from
+ *  there. The earlier version re-read the panel's size on each move and added the
+ *  delta-from-drag-start to it, so a 120px drag arriving as four moves subtracted 120 four times
+ *  and a 620px panel ended at 320, pinned to the minimum — which reads exactly like the panel
+ *  fighting you. Now it is start + delta, always, for moving and for sizing.
+ *
+ *  Pointer capture keeps the drag alive when the cursor outruns the handle, which over a live
+ *  iframe is the normal case, and body.dragging makes every widget frame click-through so a drag
+ *  never presses one of the widget's own buttons on the way past. */
+function startDrag(e, which, id, both) {
+  if (e.button != null && e.button !== 0) return;
+  e.preventDefault();
+  const handle = e.currentTarget;
+  try { handle.setPointerCapture(e.pointerId); } catch { /* window listeners still work */ }
+  const x0 = e.clientX, y0 = e.clientY;
+  const isStack = id[0] === "s";
+  const key = isStack ? "" : id.slice(2);
+  const st = isStack ? S.stacks.find((x) => x.id === id.slice(2)) : null;
+  // The origin, read ONCE.
+  const size0 = which === "size" ? (isStack ? stackSizeOf(st) : { ...sizeOf(key) }) : null;
+  const pos0 = which === "move" ? { ...(S.pos[id] || { x: 0, y: 0 }) } : null;
+  // Grab it, see it. On pointerdown, not pointerup — see bringToFront.
+  if (which === "move") bringToFront(id);
+
+  document.body.classList.add("dragging");
+  const move = (ev) => {
+    const dx = ev.clientX - x0, dy = ev.clientY - y0;
+    if (which === "move") {
+      S.pos[id] = { x: Math.round(pos0.x + dx), y: Math.round(pos0.y + dy) };
+      placeEl(id);
+      return;
+    }
+    const w = Math.round(clamp(size0.w + dx, MIN_W, MAX_W));
+    const h = both ? Math.round(clamp(size0.h + dy, MIN_H, MAX_H)) : size0.h;
+    if (isStack) {
+      // 🔑 SET, DO NOT FLOOR. Every member is set TO the new stack size, clamped to the smallest
+      // a panel may be. An earlier version only ever grew members (Math.max), on the theory that a
+      // widget's own size was a floor worth protecting — which meant a stack could be made bigger
+      // and never smaller, and the panel you were shrinking snapped straight back to its largest
+      // member. The member sizes are what the stack is made of, so the stack writes them, both
+      // ways, and the stack is then exactly what its members are.
+      for (const k of st.members) S.size[k] = { w, h };
+      const sc = stackCards[st.id];
+      if (sc) { sc.w = w; sc.h = h; sizeStackCard(sc, w, h); }
+    } else {
+      S.size[key] = { w, h };
+      sizeCard(key, w, h);
+    }
+  };
+  const up = () => {
+    document.body.classList.remove("dragging");
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    try { handle.releasePointerCapture(e.pointerId); } catch { /* already gone */ }
+    save();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+}
+
+// ── bar ────────────────────────────────────────────────────────────────────────────────────────
+$("scale").addEventListener("input", (e) => { S.scale = Number(e.target.value); save(); applyScale(); });
+$("freeMode").addEventListener("click", () => (S.free ? toFlow() : toFree()));
+$("clear").addEventListener("click", () => {
+  S.shown = []; S.stacks = [];
+  for (const el of $("chips").querySelectorAll("input")) el.checked = false;
+  save(); relayout();
+});
+$("reload").addEventListener("click", () => {
+  for (const k in cards) {
+    const fresh = newFrame(k);
+    cards[k].frame.replaceWith(fresh);
+    cards[k].frame = fresh;
+  }
+  relayout();
+  $("status").textContent = "reloaded";
+  $("status").className = "";
+});
+
+$("host").textContent = location.host;
+buildChips();
+relayout();
+window.addEventListener("resize", () => { if (S.free) sizeBoard(); });
+</script>
+</body>
+</html>
